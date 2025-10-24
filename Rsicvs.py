@@ -1,125 +1,135 @@
-# app.py
+# Rsicvs.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="הורדת Close + RSI(14)", layout="centered")
+st.set_page_config(page_title="RSI Downloader", layout="centered")
 
-st.title("הורדת נתוני סגירה + RSI(14)")
-st.markdown("הכנס טיקר (למשל: AAPL), בחר תקופה וסוג גרף — תקבל קובץ CSV עם Close ו-RSI(14) לכל נר.")
+st.title("📊 הורדת נתוני סגירה + RSI(14)")
+st.markdown("הכנס טיקר, בחר תקופה וסוג גרף – ותקבל קובץ CSV עם מחיר הסגירה וערך RSI(14) בכל נר.")
 
-# --- Inputs ---
-ticker = st.text_input("טיקר (Ticker)", value="AAPL").upper().strip()
+# --- קלטים מהמשתמש ---
+ticker = st.text_input("טיקר (לדוגמה: AAPL)", value="AAPL").upper().strip()
 
 col1, col2 = st.columns(2)
 with col1:
-    grp_type = st.radio("סוג גרף / אינטרוול", ("יומי (Daily)", "שיעתי (Hourly)"))
+    interval_label = st.radio("סוג גרף / אינטרוול:", ("יומי (Daily)", "שיעתי (Hourly)"))
 with col2:
-    use_adj = st.checkbox("השתמש ב-Adj Close אם קיים (ברירת מחדל: כן)", value=True)
+    use_adj = st.checkbox("השתמש ב-Adj Close אם קיים (מומלץ)", value=True)
 
-# תקופה: אפשר לבחור בין פרקי זמן סטנדרטיים או טווח תאריכים
-period_mode = st.selectbox("בחר תקופת נתונים", ("Last N days (מספר ימים אחורה)", "טווח תאריכים"))
+# תקופת נתונים
+period_mode = st.selectbox("בחר שיטת בחירת טווח", ("מספר ימים אחורה", "טווח תאריכים"))
 
-if period_mode == "Last N days (מספר ימים אחורה)":
-    days = st.number_input("כמה ימים אחורה למשוך?", min_value=1, value=365, step=1)
+if period_mode == "מספר ימים אחורה":
+    days = st.number_input("כמה ימים אחורה למשוך?", min_value=1, value=365)
     end = datetime.now().date()
     start = end - timedelta(days=int(days))
 else:
-    start, end = st.date_input("בחר טווח תאריכים (Start, End)", 
-                               value=(datetime.now().date() - timedelta(days=365), datetime.now().date()))
-    # אם המשתמש הקל逆, נוודא start <= end
+    start, end = st.date_input(
+        "בחר טווח תאריכים (מתאריך → עד תאריך)",
+        value=(datetime.now().date() - timedelta(days=365), datetime.now().date())
+    )
     if isinstance(start, tuple) or start > end:
-        st.error("אנא ודא ש-Start ≤ End")
+        st.error("אנא ודא ש־Start קטן או שווה ל־End")
         st.stop()
 
-# Map chart type to yfinance interval
-interval = "1d" if grp_type.startswith("יומי") else "1h"
+interval = "1d" if interval_label.startswith("יומי") else "1h"
 
-st.markdown(f"**טיקר:** {ticker}  •  **טווח:** {start} → {end}  •  **אינטרוול:** {interval}")
+st.markdown(f"**טיקר:** {ticker} | **טווח:** {start} → {end} | **אינטרוול:** {interval}")
 
-# --- RSI calculation (Wilder / EWM approach) ---
+# --- פונקציה לחישוב RSI ---
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    # Wilder smoothing via EWM with alpha = 1/period
     avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    # handle zero loss
     rsi = rsi.fillna(0)
-    rsi[(avg_gain == 0) & (avg_loss == 0)] = np.nan  # if no movement, keep NaN
-    rsi[avg_loss == 0] = 100  # avoid division by zero -> RSI = 100
+    rsi[(avg_gain == 0) & (avg_loss == 0)] = np.nan
+    rsi[avg_loss == 0] = 100
     return rsi
 
-# --- Fetch data ---
-if st.button("משוך נתונים וחישב CSV"):
+# --- שליפת נתונים ---
+if st.button("📥 משוך נתונים וחישב RSI"):
     if not ticker:
         st.error("אנא הזן טיקר תקף.")
         st.stop()
 
-    # yfinance period parameter can accept start/end; we'll use start/end to be explicit
     try:
         with st.spinner("מושך נתונים מ-Yahoo Finance..."):
-            df = yf.download(ticker, start=pd.to_datetime(start), end=pd.to_datetime(end) + pd.Timedelta(days=1),
-                             interval=interval, progress=False, threads=True, auto_adjust=False)
+            df = yf.download(
+                ticker,
+                start=pd.to_datetime(start),
+                end=pd.to_datetime(end) + pd.Timedelta(days=1),
+                interval=interval,
+                progress=False,
+                threads=True,
+                auto_adjust=False
+            )
     except Exception as e:
         st.error(f"שגיאה בשליפת נתונים: {e}")
         st.stop()
 
     if df.empty:
-        st.error("לא נמצאו נתונים עבור הטווח/טיקר הנתון. נסה טווח תאריכים אחר או טיקר אחר.")
+        st.error("לא נמצאו נתונים עבור הטיקר או הטווח שבחרת.")
         st.stop()
 
-    # בחר מחיר לסגירה — Adjusted Close אם רוצים ויש
+    # בחירת מחיר סגירה מתאים
     if use_adj and "Adj Close" in df.columns:
         price_col = "Adj Close"
     else:
-        # yfinance for intraday may not have 'Adj Close'; use 'Close'
         price_col = "Close"
 
-    # ודא שיש עמודת Close/Adj Close
-    if price_col not in df.columns:
-        st.error(f"העמודה {price_col} לא נמצאה בנתונים שחזרו.")
-        st.stop()
-
     df = df[[price_col]].rename(columns={price_col: "Close"})
-    # אם האינדקס הוא timezone-aware, נפשט אותו לתחום תאריכים רגיל (UTC או מקומי לפי הצורך)
     df.index = pd.to_datetime(df.index)
 
     # חישוב RSI(14)
     df["RSI_14"] = compute_rsi(df["Close"], period=14)
 
-    # שמירה והצגה
-    df_reset = df.reset_index().rename(columns={"index": "Datetime"})
-    # יחלץ תאריכים בזמן ISO
-    df_reset["Datetime"] = df_reset["Datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    # --- ננקה ונאתר את עמודת הזמן ---
+    df_reset = df.reset_index()
 
-    # הצגה בסיסית
-    st.success(f"נמשכו {len(df_reset)} שורות.")
+    # נזהה עמודת זמן לפי שם (Date, Datetime, index וכו')
+    time_col = None
+    for c in df_reset.columns:
+        if "date" in c.lower() or "time" in c.lower():
+            time_col = c
+            break
+
+    if time_col is not None:
+        df_reset.rename(columns={time_col: "Datetime"}, inplace=True)
+        df_reset["Datetime"] = pd.to_datetime(df_reset["Datetime"], errors="coerce")
+        df_reset["Datetime"] = df_reset["Datetime"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        st.warning("לא נמצאה עמודת זמן — הנתונים יישמרו ללא עמודת תאריך/שעה.")
+
+    # --- הצגה ושמירה ---
+    st.success(f"✅ נמשכו {len(df_reset)} שורות בהצלחה.")
     st.dataframe(df_reset.tail(20))
 
-    # CSV להורדה
+    # יצירת CSV להורדה
     csv = df_reset.to_csv(index=False).encode("utf-8")
-    filename = f"{ticker}_close_rsi14_{start}_{end}.csv"
-    st.download_button("הורד CSV", data=csv, file_name=filename, mime="text/csv")
+    filename = f"{ticker}_RSI14_{start}_{end}.csv"
+    st.download_button("📄 הורד קובץ CSV", data=csv, file_name=filename, mime="text/csv")
 
-    # אופציונלי: הורדת קובץ Excel
+    # אופציונלי: הורדת Excel
     try:
         import io
         excel_buffer = io.BytesIO()
         df_reset.to_excel(excel_buffer, index=False)
-        st.download_button("הורד כ-Excel", data=excel_buffer.getvalue(), file_name=filename.replace(".csv", ".xlsx"), mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("📘 הורד כקובץ Excel", data=excel_buffer.getvalue(),
+                           file_name=filename.replace(".csv", ".xlsx"),
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception:
-        # אם אין openpyxl/xlsxwriter, נדלג
         pass
 
-    st.markdown("**הערות:**")
-    st.markdown("- RSI מחושב בעזרת Wilder smoothing (EWM עם α=1/14).")
-    st.markdown("- אם אין נתוני Adjusted עבור טווח/אינטרוול מסוים, המערכת משתמשת ב-Close.")
-    st.markdown("- לנתונים שעתיים/דקותיים יש הגבלות היסטוריות ב-Yahoo; אם לא מופיעים נתונים רבים ל-'1h', נסה טווח קצר יותר.")
+    st.markdown("#### הערות:")
+    st.markdown("- RSI מחושב לפי שיטת Wilder (EWM עם α=1/14).")
+    st.markdown("- אם אין נתוני Adjusted, משמשים ב־Close רגיל.")
+    st.markdown("- עבור נתונים שעתיים ייתכן שטווח ההיסטוריה מוגבל ב־Yahoo.")
 
-st.caption("נבנה ב-Python  (streamlit + yfinance + pandas).")
+st.caption("נבנה על ידי ChatGPT GPT-5 · משתמש ב־yfinance, pandas ו־streamlit")
