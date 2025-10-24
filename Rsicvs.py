@@ -1,5 +1,5 @@
-# app.py - Streamlit app: Yahoo Finance → Close + RSI(14)
-# כולל: בחירה בין Close/Adj Close, וחישוב RSI בשיטת Wilder (SMA התחלתית)
+# app.py - Streamlit app: Yahoo Finance → Close + RSI(14) (Fixed rsi_wilder)
+# העתק/הדבק והריץ: streamlit run app.py
 import io
 from datetime import date, timedelta
 import numpy as np
@@ -13,76 +13,92 @@ st.set_page_config(page_title="YahooHist → Close + RSI(14)", layout="wide")
 def _interval_from_choice(choice: str) -> str:
     return "60m" if choice == "שעה (Hourly)" else "1d"
 
-def rsi_wilder(prices: pd.Series, period: int = 14) -> pd.Series:
+def rsi_wilder(prices, period: int = 14) -> pd.Series:
     """
-    RSI calculation using Wilder's smoothing:
-    1) Compute deltas, gains and losses
-    2) First average gain/loss = SMA of first `period` values
-    3) Subsequent averages: prev_avg * (period-1) / period + current_gain/loss / period
-    Returns a Series same index as `prices`.
+    RSI calculation using Wilder's smoothing with SMA start.
+    Robust to receiving a DataFrame (will use first column) or a Series.
+    Returns a pandas.Series aligned to the input Series index (NaN where undefined).
     """
-    prices = prices.dropna()
-    if prices.empty:
-        return pd.Series(dtype="float64")
+    # אם הגיע DataFrame - קח את העמודה הראשונה
+    if isinstance(prices, pd.DataFrame):
+        if prices.shape[1] == 0:
+            return pd.Series(dtype="float64")
+        prices = prices.iloc[:, 0]
 
-    delta = prices.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
+    # וודא Series
+    prices = pd.Series(prices).copy()
 
-    # Prepare arrays
+    # שמור את האינדקס המקורי (ליישור חזרה בסוף)
+    orig_index = prices.index
+
+    # המרת נתונים למספריים והסרת ערכי NaN זמניים (נקיים מאפשרים חישוב)
+    prices_numeric = prices.astype(float)
+    # לא ל-dropna על האינדקס המקורי — אבל לחישוב נשתמש ב־prices_numeric ונתן NaN שם שנדרש
+    # כדי למנוע בעיות מיקום, נשתמש ב-subseries ללא ערכי NaN זמניים לחישוב הדלתא
+    prices_no_na = prices_numeric.dropna()
+    n = len(prices_no_na)
+
+    # אם אין מספיק נקודות -> החזר Series שתואם לאינדקס המקורי עם NaN
+    result = pd.Series(index=orig_index, data=np.nan, dtype="float64")
+    if n <= period:
+        return result
+
+    # חישוב דלתא על הסדרה ללא NaN
+    delta = prices_no_na.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
     gain_vals = gain.to_numpy()
     loss_vals = loss.to_numpy()
 
-    rsi = np.full_like(gain_vals, fill_value=np.nan, dtype="float64")
+    # יצירת מערך RSI מלא ב-NaN עבור הסדרה ללא NaN
+    rsi_vals = np.full(len(gain_vals), np.nan, dtype="float64")
 
-    # Need at least period+1 points to compute first RSI value (because first diff yields NaN)
-    if len(prices) <= period:
-        return pd.Series(rsi, index=prices.index)
+    # חישוב ממוצע התחלתי (SMA) על הערכים gains[1:period+1] (period ערכים)
+    # בדקו שיש מספיק ערכים (נבדק למעלה)
+    first_gain_avg = np.mean(gain_vals[1: period + 1])
+    first_loss_avg = np.mean(loss_vals[1: period + 1])
 
-    # First average (SMA) computed on gains[1:period]?? Standard approach: use first `period` deltas (skip the NaN at index 0)
-    # We'll compute SMA over gains[1:period+1] (i.e., the first `period` non-NaN delta values)
-    # Indices: gains[1] .. gains[period] inclusive -> total `period` values
-    first_gain_avg = np.mean(gain_vals[1: period+1])
-    first_loss_avg = np.mean(loss_vals[1: period+1])
+    avg_gain = float(first_gain_avg)
+    avg_loss = float(first_loss_avg)
 
-    avg_gain = first_gain_avg
-    avg_loss = first_loss_avg
-
-    # RSI for the point at index period (i.e., corresponding to prices.index[period])
-    # Compute RS and RSI
-    if avg_loss == 0:
-        rs = np.inf
-        rsi_val = 100.0
+    # RSI לנקודה index = period (במונחים של prices_no_na)
+    if avg_loss == 0.0:
+        rsi_vals[period] = 100.0
     else:
         rs = avg_gain / avg_loss
-        rsi_val = 100.0 - (100.0 / (1.0 + rs))
-    rsi[period] = rsi_val
+        rsi_vals[period] = 100.0 - (100.0 / (1.0 + rs))
 
-    # Now iterate forward and apply Wilder smoothing
+    # המשך חישוב עם Wilder smoothing
     for i in range(period + 1, len(gain_vals)):
-        g = gain_vals[i]
-        l = loss_vals[i]
+        g = gain_vals[i] if not np.isnan(gain_vals[i]) else 0.0
+        l = loss_vals[i] if not np.isnan(loss_vals[i]) else 0.0
         avg_gain = (avg_gain * (period - 1) + g) / period
         avg_loss = (avg_loss * (period - 1) + l) / period
 
-        if avg_loss == 0:
-            rsi[i] = 100.0
+        if avg_loss == 0.0:
+            rsi_vals[i] = 100.0
         else:
             rs = avg_gain / avg_loss
-            rsi[i] = 100.0 - (100.0 / (1.0 + rs))
+            rsi_vals[i] = 100.0 - (100.0 / (1.0 + rs))
 
-    # Return Series aligned to original (NaN where undefined)
-    return pd.Series(rsi, index=prices.index)
+    # בונים Series עם אינדקס של prices_no_na
+    rsi_series_no_na = pd.Series(rsi_vals, index=prices_no_na.index)
+
+    # החזרה ל-index המקורי: נשמור ערכים רק למועדונים שקיימים ב-prices_no_na,
+    # ושאר האינדקסים ישארו NaN (result כבר מוכן לכך).
+    for idx, val in rsi_series_no_na.items():
+        result.at[idx] = val
+
+    return result
 
 @st.cache_data(show_spinner=False)
-def download_data(ticker: str, start: date, end: date, interval: str, auto_adjust: bool = False) -> pd.DataFrame:
+def download_data(ticker: str, start: date, end: date, interval: str) -> pd.DataFrame:
     """
     Download historical data using yfinance.download.
-    If auto_adjust=True, yfinance returns adjusted close as 'Close' (and drops 'Adj Close').
-    To be explicit, we request auto_adjust=False (so we can show both Close and Adj Close if available),
-    but allow caller to set auto_adjust if desired.
+    For daily intervals, add one day to 'end' param to include the end date.
+    Keep auto_adjust=False so we have both Close and Adj Close.
     """
-    # For daily intervals we add one day to end so the requested end date is included
     end_param = (end + timedelta(days=1)).isoformat() if interval == "1d" else end.isoformat()
     df = yf.download(
         ticker,
@@ -91,7 +107,7 @@ def download_data(ticker: str, start: date, end: date, interval: str, auto_adjus
         interval=interval,
         progress=False,
         threads=True,
-        auto_adjust=False,  # we keep raw Close and Adj Close so user can choose which to use
+        auto_adjust=False,
         actions=False
     )
     return df
@@ -107,7 +123,7 @@ def make_excel_bytes(df: pd.DataFrame) -> bytes:
     return towrite.read()
 
 # ---------- Page layout ----------
-st.title("Yahoo Finance — Close + RSI(14) (Wilder)")
+st.title("Yahoo Finance — Close + RSI(14) (Wilder) — Fixed")
 st.markdown(
     "כאן אפשר לבחור האם לחשב RSI על בסיס `Adj Close` (מחירים מתוקנים) או `Close` (לא מתוקנים), ולראות את שתי העמודות לצורך השוואה."
 )
@@ -272,9 +288,17 @@ with right_col:
                     st.session_state["last_df"] = df_res
 
                     # Display info
+                    # find first/last non-null index for display purposes
+                    non_null_idx = df_res.index[df_res[f"RSI_{rsi_period}"].notna()]
+                    if len(non_null_idx) > 0:
+                        first_idx = non_null_idx[0]
+                        last_idx = non_null_idx[-1]
+                        range_str = f"{first_idx.strftime('%Y-%m-%d %H:%M')} → {last_idx.strftime('%Y-%m-%d %H:%M')}"
+                    else:
+                        range_str = "לא מספיק נתונים לחישוב RSI"
+
                     st.success(
-                        f"נמצאו {len(df_res)} שורות — חישוב RSI על בסיס: {source_used} — "
-                        f"טווח: {df_res.index[0].strftime('%Y-%m-%d %H:%M')} → {df_res.index[-1].strftime('%Y-%m-%d %H:%M')}"
+                        f"נמצאו {len(df_res)} שורות — חישוב RSI על בסיס: {source_used} — טווח: {range_str}"
                     )
 
                     preview_count = st.slider(
@@ -288,7 +312,8 @@ with right_col:
 
                     # Graphs
                     with st.expander("הצג גרפים"):
-                        st.line_chart(df_res["Close"].dropna().tail(500)) if "Close" in df_res.columns else None
+                        if "Close" in df_res.columns:
+                            st.line_chart(df_res["Close"].dropna().tail(500))
                         if has_adj:
                             st.line_chart(df_res["Adj Close"].dropna().tail(500))
                         st.line_chart(df_res[f"RSI_{rsi_period}"].dropna().tail(500))
@@ -328,4 +353,4 @@ with right_col:
 
 # ---------- Footer ----------
 st.markdown("***")
-st.caption("הערה: למרות מאמצינו להתאים את החישוב לגרפים ציבוריים, ייתכנו הבדלים קלים בין פלטפורמות שונות (שיטות התחשיב התחלתיות, התאמות דיוק, או עדכוני נתונים). אם תרצה, אוכל להשוות ערכי RSI בין שיטות (SMA start / EWM / Wilder) ולייצא קולומות להשוואה.")
+st.caption("הערה: למרות מאמצינו להתאים את החישוב לגרפים ציבוריים, ייתכנו הבדלים קלים בין פלטפורמות שונות. אם תרצה — אשווה בין שיטות חישוב (SMA-start / EWM / Wilder) ואוסיף זאת לייצוא.")
