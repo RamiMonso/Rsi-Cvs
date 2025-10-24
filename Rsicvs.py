@@ -1,4 +1,4 @@
-# app.py - Streamlit app: Yahoo Finance → Close + RSI(14) (Fixed rsi_wilder)
+# app.py - Streamlit app: Yahoo Finance → Close + RSI(14) with warmup
 # העתק/הדבק והריץ: streamlit run app.py
 import io
 from datetime import date, timedelta
@@ -7,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
-st.set_page_config(page_title="YahooHist → Close + RSI(14)", layout="wide")
+st.set_page_config(page_title="YahooHist → Close + RSI(14) with Warmup", layout="wide")
 
 # ---------- Helpers ----------
 def _interval_from_choice(choice: str) -> str:
@@ -19,31 +19,22 @@ def rsi_wilder(prices, period: int = 14) -> pd.Series:
     Robust to receiving a DataFrame (will use first column) or a Series.
     Returns a pandas.Series aligned to the input Series index (NaN where undefined).
     """
-    # אם הגיע DataFrame - קח את העמודה הראשונה
     if isinstance(prices, pd.DataFrame):
         if prices.shape[1] == 0:
             return pd.Series(dtype="float64")
         prices = prices.iloc[:, 0]
 
-    # וודא Series
     prices = pd.Series(prices).copy()
-
-    # שמור את האינדקס המקורי (ליישור חזרה בסוף)
     orig_index = prices.index
 
-    # המרת נתונים למספריים והסרת ערכי NaN זמניים (נקיים מאפשרים חישוב)
     prices_numeric = prices.astype(float)
-    # לא ל-dropna על האינדקס המקורי — אבל לחישוב נשתמש ב־prices_numeric ונתן NaN שם שנדרש
-    # כדי למנוע בעיות מיקום, נשתמש ב-subseries ללא ערכי NaN זמניים לחישוב הדלתא
     prices_no_na = prices_numeric.dropna()
     n = len(prices_no_na)
 
-    # אם אין מספיק נקודות -> החזר Series שתואם לאינדקס המקורי עם NaN
     result = pd.Series(index=orig_index, data=np.nan, dtype="float64")
     if n <= period:
         return result
 
-    # חישוב דלתא על הסדרה ללא NaN
     delta = prices_no_na.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -51,25 +42,20 @@ def rsi_wilder(prices, period: int = 14) -> pd.Series:
     gain_vals = gain.to_numpy()
     loss_vals = loss.to_numpy()
 
-    # יצירת מערך RSI מלא ב-NaN עבור הסדרה ללא NaN
     rsi_vals = np.full(len(gain_vals), np.nan, dtype="float64")
 
-    # חישוב ממוצע התחלתי (SMA) על הערכים gains[1:period+1] (period ערכים)
-    # בדקו שיש מספיק ערכים (נבדק למעלה)
     first_gain_avg = np.mean(gain_vals[1: period + 1])
     first_loss_avg = np.mean(loss_vals[1: period + 1])
 
     avg_gain = float(first_gain_avg)
     avg_loss = float(first_loss_avg)
 
-    # RSI לנקודה index = period (במונחים של prices_no_na)
     if avg_loss == 0.0:
         rsi_vals[period] = 100.0
     else:
         rs = avg_gain / avg_loss
         rsi_vals[period] = 100.0 - (100.0 / (1.0 + rs))
 
-    # המשך חישוב עם Wilder smoothing
     for i in range(period + 1, len(gain_vals)):
         g = gain_vals[i] if not np.isnan(gain_vals[i]) else 0.0
         l = loss_vals[i] if not np.isnan(loss_vals[i]) else 0.0
@@ -82,11 +68,8 @@ def rsi_wilder(prices, period: int = 14) -> pd.Series:
             rs = avg_gain / avg_loss
             rsi_vals[i] = 100.0 - (100.0 / (1.0 + rs))
 
-    # בונים Series עם אינדקס של prices_no_na
     rsi_series_no_na = pd.Series(rsi_vals, index=prices_no_na.index)
 
-    # החזרה ל-index המקורי: נשמור ערכים רק למועדונים שקיימים ב-prices_no_na,
-    # ושאר האינדקסים ישארו NaN (result כבר מוכן לכך).
     for idx, val in rsi_series_no_na.items():
         result.at[idx] = val
 
@@ -123,9 +106,9 @@ def make_excel_bytes(df: pd.DataFrame) -> bytes:
     return towrite.read()
 
 # ---------- Page layout ----------
-st.title("Yahoo Finance — Close + RSI(14) (Wilder) — Fixed")
+st.title("Yahoo Finance — Close + RSI(14) with Warmup")
 st.markdown(
-    "כאן אפשר לבחור האם לחשב RSI על בסיס `Adj Close` (מחירים מתוקנים) או `Close` (לא מתוקנים), ולראות את שתי העמודות לצורך השוואה."
+    "בחר טיקר, טווח, אינטרוול ובצע 'חימום' (warmup) של X ימים לפני התאריך שבחרת — כך ה-RSI של היום הראשון יחושב מתוך היסטוריה ארוכה."
 )
 
 left_col, right_col = st.columns([1, 2])
@@ -171,6 +154,11 @@ with left_col:
             "הצג עמודות נוספות (Open/High/Low/Volume)",
             value=st.session_state.get("include_ohlcv", False)
         )
+
+        st.markdown("**Warmup (חימום) ל-RSI**")
+        warmup_enabled = st.checkbox("הפעל חימום ל-RSI", value=True, help="אם מסומן - יוריד נתונים נוספים לפני תאריך ההתחלה לחישוב RSI מדויק.")
+        warmup_days = st.number_input("מספר ימים לחימום (לדוגמה 1000)", min_value=0, max_value=5000, value=st.session_state.get("warmup_days", 1000), step=1)
+
         submit = st.form_submit_button("הורד והצג")
 
     if example_fill:
@@ -181,6 +169,8 @@ with left_col:
         st.session_state["rsi_period"] = 14
         st.session_state["use_adj"] = True
         st.session_state["include_ohlcv"] = False
+        st.session_state["warmup_days"] = 1000
+        st.session_state["warmup_enabled"] = True
         st.experimental_rerun()
 
     if submit:
@@ -191,16 +181,18 @@ with left_col:
         st.session_state["rsi_period"] = int(rsi_period)
         st.session_state["use_adj"] = bool(use_adj)
         st.session_state["include_ohlcv"] = include_ohlcv
+        st.session_state["warmup_enabled"] = bool(warmup_enabled)
+        st.session_state["warmup_days"] = int(warmup_days)
 
     st.markdown("---")
     st.write("טיפים:")
-    st.write("- אם ברצונך שהתוצאות יתאימו ל-Google/Yahoo charts — השתמש ב-Adj Close.")
-    st.write("- נתונים אינטרדיי (שעה) יכולים להיות מוגבלים לטווחים קצרים.")
+    st.write("- עבור התאמה לגרפים ציבוריים השתמש ב-Adj Close.")
+    st.write("- חימום גדול עובד טוב עבור נתונים יומיים; עבור נתוני אינטרדיי יכול להיות מוגבל.")
 
 # ---------- Right column: results / status ----------
 with right_col:
     st.header("תוצאות")
-    has_input = all(k in st.session_state for k in ("ticker", "start_date", "end_date", "interval_choice", "rsi_period", "use_adj"))
+    has_input = all(k in st.session_state for k in ("ticker", "start_date", "end_date", "interval_choice", "rsi_period", "use_adj", "warmup_enabled", "warmup_days"))
     if not has_input:
         st.info("מלא את הפרטים משמאל ולחץ 'הורד והצג' כדי להתחיל.")
     else:
@@ -211,17 +203,33 @@ with right_col:
         rsi_period = st.session_state["rsi_period"]
         use_adj = st.session_state["use_adj"]
         include_ohlcv = st.session_state.get("include_ohlcv", False)
+        warmup_enabled = st.session_state["warmup_enabled"]
+        warmup_days = st.session_state["warmup_days"]
 
-        # Basic validations
         if not ticker:
             st.error("שגיאה: טיקר ריק — אנא הכנס טיקר תקין.")
         elif start_date > end_date:
             st.error("שגיאה: תאריך התחלה חייב להיות לפני תאריך סיום.")
         else:
             interval = _interval_from_choice(interval_choice)
+
+            # Determine download start considering warmup
+            if warmup_enabled and warmup_days > 0:
+                # For intraday, cap warmup to a safer default (Yahoo often limits intraday history)
+                if interval == "60m" and warmup_days > 60:
+                    capped = 60
+                    st.warning(f"נתוני אינטרדיי מוגבלים בדרך כלל — חימום שביקשת ({warmup_days} ימים) גדול מדי עבור hourly. בוצע קיזוז ל־{capped} ימים במקום.")
+                    eff_warmup_days = capped
+                else:
+                    eff_warmup_days = warmup_days
+                download_start = start_date - timedelta(days=eff_warmup_days)
+            else:
+                download_start = start_date
+
+            # Download extended data
             try:
-                with st.spinner("מוריד נתונים מ-Yahoo Finance..."):
-                    raw = download_data(ticker, start_date, end_date, interval)
+                with st.spinner("מוריד נתונים מ-Yahoo Finance (כולל חימום אם נבחר)..."):
+                    raw = download_data(ticker, download_start, end_date, interval)
             except Exception as e:
                 st.error(f"שגיאה בעת הורדת הנתונים: {e}")
                 raw = pd.DataFrame()
@@ -235,93 +243,93 @@ with right_col:
                 )
             else:
                 df = raw.copy()
-                # ודא אינדקס מסוג DatetimeIndex
                 if not isinstance(df.index, pd.DatetimeIndex):
                     df.index = pd.to_datetime(df.index)
                 df = df.sort_index()
 
-                # Ensure Adj Close exists for comparison; yfinance returns 'Adj Close' if available
                 has_adj = "Adj Close" in df.columns
 
-                # Build result frame: optionally include OHLCV, show Close and Adj Close (if present)
                 cols = []
                 if include_ohlcv:
                     for c in ("Open", "High", "Low", "Volume"):
                         if c in df.columns:
                             cols.append(c)
-                # Always attempt to include Close and Adj Close (if present)
                 if "Close" in df.columns:
                     cols.append("Close")
                 if has_adj:
                     cols.append("Adj Close")
 
-                df_res = df[cols].copy()
-                df_res.index.name = "Datetime"
+                df_res_full = df[cols].copy()
+                df_res_full.index.name = "Datetime"
 
-                # Choose price series for RSI calculation
-                price_series_for_rsi = None
+                # choose price series (from extended data)
                 if use_adj and has_adj:
-                    price_series_for_rsi = df_res["Adj Close"]
+                    price_series_for_rsi = df_res_full["Adj Close"]
                     source_used = "Adj Close"
-                elif "Close" in df_res.columns:
-                    price_series_for_rsi = df_res["Close"]
+                elif "Close" in df_res_full.columns:
+                    price_series_for_rsi = df_res_full["Close"]
                     source_used = "Close"
                 else:
                     st.error("אין עמודת מחיר זמינה לחישוב RSI.")
                     price_series_for_rsi = None
                     source_used = "None"
 
-                # Compute RSI using Wilder's method
                 if price_series_for_rsi is not None:
-                    rsi_series = rsi_wilder(price_series_for_rsi, period=rsi_period)
-                    df_res[f"RSI_{rsi_period}"] = rsi_series
+                    # compute RSI on the extended series
+                    rsi_series_full = rsi_wilder(price_series_for_rsi, period=rsi_period)
+                    df_res_full[f"RSI_{rsi_period}"] = rsi_series_full
+
+                    # Now trim to user-visible window: from start_date -> end_date
+                    view_mask = (df_res_full.index >= pd.to_datetime(start_date)) & (df_res_full.index <= pd.to_datetime(end_date) + pd.Timedelta(days=1))
+                    df_view = df_res_full.loc[view_mask].copy()
+                    # Note: for intraday the +1 day may include extra; but it's safe to then slice by <= end_date with time if needed
+                    df_view = df_view.loc[df_view.index <= pd.to_datetime(end_date) + pd.Timedelta(days=1)]
 
                     # Round numeric columns safely
-                    numeric_cols = df_res.select_dtypes(include="number").columns
+                    numeric_cols = df_view.select_dtypes(include="number").columns
                     for col in numeric_cols:
                         if str(col).startswith("RSI"):
-                            df_res[col] = df_res[col].round(2)
+                            df_view[col] = df_view[col].round(2)
                         else:
-                            df_res[col] = df_res[col].round(4)
+                            df_view[col] = df_view[col].round(4)
 
                     # Save last df for download
-                    st.session_state["last_df"] = df_res
+                    st.session_state["last_df"] = df_view
 
-                    # Display info
-                    # find first/last non-null index for display purposes
-                    non_null_idx = df_res.index[df_res[f"RSI_{rsi_period}"].notna()]
+                    # Display info: find first/last non-null RSI in the view (should exist if warmup adequate)
+                    non_null_idx = df_view.index[df_view[f"RSI_{rsi_period}"].notna()] if f"RSI_{rsi_period}" in df_view.columns else []
                     if len(non_null_idx) > 0:
                         first_idx = non_null_idx[0]
                         last_idx = non_null_idx[-1]
                         range_str = f"{first_idx.strftime('%Y-%m-%d %H:%M')} → {last_idx.strftime('%Y-%m-%d %H:%M')}"
                     else:
-                        range_str = "לא מספיק נתונים לחישוב RSI"
+                        range_str = "לא מספיק נתונים לחישוב RSI בטווח זה (שקול להגדיל חימום)"
 
                     st.success(
-                        f"נמצאו {len(df_res)} שורות — חישוב RSI על בסיס: {source_used} — טווח: {range_str}"
+                        f"נמצאו {len(df_view)} שורות לתצוגה — חישוב RSI על בסיס: {source_used} — טווח RSI: {range_str}"
                     )
 
                     preview_count = st.slider(
                         "הצג שורות (Preview)",
                         min_value=5,
-                        max_value=min(1000, len(df_res)),
-                        value=min(25, len(df_res)),
+                        max_value=min(1000, max(5, len(df_view))),
+                        value=min(25, max(5, len(df_view))),
                         step=5
                     )
-                    st.dataframe(df_res.tail(preview_count), use_container_width=True)
+                    st.dataframe(df_view.tail(preview_count), use_container_width=True)
 
-                    # Graphs
                     with st.expander("הצג גרפים"):
-                        if "Close" in df_res.columns:
-                            st.line_chart(df_res["Close"].dropna().tail(500))
-                        if has_adj:
-                            st.line_chart(df_res["Adj Close"].dropna().tail(500))
-                        st.line_chart(df_res[f"RSI_{rsi_period}"].dropna().tail(500))
+                        if "Close" in df_view.columns:
+                            st.line_chart(df_view["Close"].dropna().tail(500))
+                        if has_adj and "Adj Close" in df_view.columns:
+                            st.line_chart(df_view["Adj Close"].dropna().tail(500))
+                        if f"RSI_{rsi_period}" in df_view.columns:
+                            st.line_chart(df_view[f"RSI_{rsi_period}"].dropna().tail(500))
 
                     # Downloads
                     try:
-                        csv_bytes = make_csv_bytes(df_res)
-                        excel_bytes = make_excel_bytes(df_res)
+                        csv_bytes = make_csv_bytes(df_view)
+                        excel_bytes = make_excel_bytes(df_view)
                     except Exception as e:
                         st.error(f"שגיאה בהכנת קבצים להורדה: {e}")
                         csv_bytes = None
@@ -353,4 +361,4 @@ with right_col:
 
 # ---------- Footer ----------
 st.markdown("***")
-st.caption("הערה: למרות מאמצינו להתאים את החישוב לגרפים ציבוריים, ייתכנו הבדלים קלים בין פלטפורמות שונות. אם תרצה — אשווה בין שיטות חישוב (SMA-start / EWM / Wilder) ואוסיף זאת לייצוא.")
+st.caption("הערה: חימום גדול מבטיח ש-RSI של ה'יום הראשון' בטווח יחושב מהיסטוריה ארוכה. עבור אינטרדיי ייתכנו הגבלות מצד Yahoo — האפליקציה תקצר חימום במידת הצורך ותתריע.")
